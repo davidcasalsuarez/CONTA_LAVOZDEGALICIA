@@ -337,8 +337,8 @@ def configurar_logging(base_dir: str):
 # ====================== MAIN ======================
 def main():
     # Nombres nuevos (Mes Actual) y antiguos (fallback). NO se crean si faltan.
-    SRC_NAMES = ["Facturas PDF completo La Voz Mes Actual", "Facturas PDF completo La Voz"]
-    DST_NAMES = ["Facturas La Voz de Galicia Mes Actual", "Facturas La Voz de Galicia"]
+    SRC_NAMES = ["Facturas PDF completo La Voz", "Facturas PDF completo La Voz"]
+    DST_NAMES = ["Facturas La Voz de Galicia", "Facturas La Voz de Galicia"]
 
     # 1) Base: directorio del script o cwd; luego sube hasta encontrar alguna de las carpetas.
     try:
