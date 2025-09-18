@@ -48,8 +48,8 @@ class FacturasLaVozMesActual:
 
             diccionario = self.leer_cuentas()
 
-            archivo = os.path.join(self.ruta, 'Excel Facturas La Voz Mes Actual', 'FacturasLaVozMesActual.xlsx')
-            logging.info("batchLaVoz.py-. generarFicheroExtraLaVoz: Leyendo Excel FacturasLaVozMesActual.xlsx")
+            archivo = os.path.join(self.ruta, 'Excel Facturas La Voz', 'FacturasLaVoz.xlsx')
+            logging.info("batchLaVoz.py-. generarFicheroExtraLaVoz: Leyendo Excel FacturasLaVoz.xlsx")
             print(f"Se procede a leer el Excel de Facturas La Voz de Galicia en: {archivo}")
 
             pf = pd.read_excel(archivo, dtype=str, engine="openpyxl").fillna("")
