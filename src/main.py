@@ -46,8 +46,8 @@ def leer_properties():
         rutaPadreOneDrive = config.get('ONEDRIVE', 'rutapadreonedrive')
         ruta_relativa = "Facturas La Voz de Galicia"
         
-        rutaPadreOneDrive = obtener_ruta_onedrive(ruta_relativa)
-        #rutaPadreOneDrive = r'C:\Users\david.casal\OneDrive - GASOLINAS, LUBRIFIC. Y REPUESTOS, S.A. (GALURESA) (1)\Facturas Tabaco'
+        #rutaPadreOneDrive = obtener_ruta_onedrive(ruta_relativa)
+        rutaPadreOneDrive = r'C:\Users\david.casal\OneDrive - GASOLINAS, LUBRIFIC. Y REPUESTOS, S.A. (GALURESA) (1)\Facturas La Voz de Galicia'
         ruta_log = os.path.join(rutaPadreOneDrive, "Log")
 
         configurar_logging(ruta_log)
@@ -87,11 +87,11 @@ def main():
     """
     try:
         ruta = leer_properties()
-        logging.info("--------------- INICIO PROCESO FACTURAS TABACO ------------------")
-        print("--------------- INICIO PROCESO FACTURAS TABACO ------------------")
-        f_tabaco = FacturasTabaco(ruta)
-        f_tabaco.generarFicheroExtraTabaco()
-        logging.info("--------------- FIN PROCESO FACTURAS TABACO ------------------")
+        logging.info("--------------- INICIO PROCESO FACTURAS LA VOZ DE GALICIA MES ACTUAL ------------------")
+        print("--------------- INICIO PROCESO FACTURAS LA VOZ MES ACTUAL ------------------")
+        f_lavoz = FacturasLaVozMesActual(ruta)
+        f_lavoz.generarFicheroExtraLaVoz()
+        logging.info("--------------- FIN PROCESO FACTURAS LA VOZ MES ACTUAL ------------------")
 
         #Enviar notificación
         envioMensaje("david.casalsuarez@galuresa.com", "Las facturas han sido procesadas")
