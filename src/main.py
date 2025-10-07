@@ -46,8 +46,8 @@ def leer_properties():
         rutaPadreOneDrive = config.get('ONEDRIVE', 'rutapadreonedrive')
         ruta_relativa = "Facturas La Voz de Galicia"
         
-        #rutaPadreOneDrive = obtener_ruta_onedrive(ruta_relativa)
-        rutaPadreOneDrive = r'C:\Users\david.casal\OneDrive - GASOLINAS, LUBRIFIC. Y REPUESTOS, S.A. (GALURESA) (1)\Facturas La Voz de Galicia'
+        rutaPadreOneDrive = obtener_ruta_onedrive(ruta_relativa)
+        #rutaPadreOneDrive = r'C:\Users\david.casal\OneDrive - GASOLINAS, LUBRIFIC. Y REPUESTOS, S.A. (GALURESA) (1)\Facturas La Voz de Galicia'
         ruta_log = os.path.join(rutaPadreOneDrive, "Log")
 
         configurar_logging(ruta_log)
