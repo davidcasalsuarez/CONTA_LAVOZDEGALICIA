@@ -20,6 +20,7 @@ import shutil
 import logging
 import traceback
 from datetime import datetime
+from typing import List, Optional  # ✅ compatibilidad Python < 3.9 / < 3.10
 
 # --------- Email opcional ---------
 try:
@@ -55,7 +56,7 @@ def _normalize_name(s: str) -> str:
     """Normaliza nombres de carpeta: colapsa espacios, strip y casefold."""
     return re.sub(r"\s+", " ", (s or "")).strip().casefold()
 
-def _find_dir_case_insensitive(base: str, names: list[str]) -> str | None:
+def _find_dir_case_insensitive(base: str, names: List[str]) -> Optional[str]:
     """
     Busca en 'base' el primer nombre de 'names' que exista (case-insensitive, ignora espacios múltiples).
     NO crea nada. Solo primer nivel; si quieres más tolerancia, baja el depth a 1..3.
@@ -70,7 +71,7 @@ def _find_dir_case_insensitive(base: str, names: list[str]) -> str | None:
             return os.path.join(base, norm_map[w])
     return None
 
-def _find_base(start: str, src_names: list[str], dst_names: list[str]) -> str:
+def _find_base(start: str, src_names: List[str], dst_names: List[str]) -> str:
     """
     Sube hasta 6 niveles buscando un directorio que contenga alguna de las carpetas de origen o destino.
     NO crea nada.
@@ -113,7 +114,7 @@ def _limpio(token):
     token = re.sub(r"\s+", "", token)
     return token.upper()
 
-def detectar_id_factura(texto: str) -> str | None:
+def detectar_id_factura(texto: str) -> Optional[str]:
     """ID por patrón DISGASA o justo tras 'Nº factura'."""
     t = " ".join((texto or "").split())
 

@@ -39,6 +39,30 @@ class FacturasLaVozMesActual:
             val = -val
         return f"{val:.2f}".replace(".", ",")
 
+    def _norm_codigo(self, raw):
+        """
+        Normaliza códigos tipo CodigoCliente / Codigo del diccionario:
+        - quita espacios
+        - si parece número (13197.0 / 13197,0 / 013197) => lo deja como entero string "13197"
+        - si no, devuelve el string tal cual (strip)
+        """
+        s = self._to_str(raw).strip().replace(" ", "")
+        if s == "":
+            return ""
+
+        s2 = s.replace(",", ".")
+        try:
+            f = float(s2)
+            if f.is_integer():
+                return str(int(f))
+        except:
+            pass
+
+        # fallback: quitar solo el sufijo .0 si venía literal
+        if s.endswith(".0"):
+            s = s[:-2]
+        return s
+
     # ------------------------ EXTRA ------------------------
 
     def generarFicheroExtraLaVoz(self):
@@ -65,15 +89,18 @@ class FacturasLaVozMesActual:
             proveedor_nombre = "DISTR.GALLEGA DE PUBLIC,S.L."
 
             for _, facturas in pf.iterrows():
-                codigo_cliente = self._to_str(facturas.get('CodigoCliente', ''))
-                # normalizar por si viene como '13197.0'
-                if codigo_cliente.endswith(".0"):
-                    codigo_cliente = codigo_cliente[:-2]
+                codigo_cliente_raw = facturas.get('CodigoCliente', '')
+                codigo_cliente = self._norm_codigo(codigo_cliente_raw)
 
                 numFactura = self._to_str(facturas.get('NumFactura', ''))
                 fecha_emision = self._to_str(facturas.get('Fecha', '')).replace("-", "/")
 
                 cuenta_contable, empresa_nombre = diccionario.get(codigo_cliente, ("Cuenta no encontrada", ""))
+
+                # (solo aviso; no cambia ficheros)
+                if cuenta_contable == "Cuenta no encontrada":
+                    logging.warning(f"CodigoCliente no encontrado en diccionario: '{codigo_cliente_raw}' -> '{codigo_cliente}'")
+                    print(f"⚠️ CodigoCliente no encontrado en diccionario: '{codigo_cliente_raw}' -> '{codigo_cliente}'")
 
                 # Importes
                 base4  = self._norm_float(facturas.get('BaseImponible4', ''))
@@ -86,6 +113,7 @@ class FacturasLaVozMesActual:
                 base21_str = self._norm(base21)
                 iva21_str  = self._norm(iva21)
 
+                # TOTAL FACTURA SIEMPRE NEGATIVO
                 total_factura_str = self._norm(facturas.get('TotalFactura', ''), forzar_negativo=True)
 
                 if (numFactura == "0" or numFactura != self._to_str(facturas.get('NumFactura', ''))):
@@ -106,7 +134,8 @@ class FacturasLaVozMesActual:
                     ])
 
                     # Tramo 21%: base a cuenta estación, IVA a 47200021
-                    if (base21 > 0) or (iva21 > 0):
+                    # ✅ entra también si viene en negativo
+                    if (base21 != 0) or (iva21 != 0):
                         listaFicheroExtraIva.append([
                             fecha_emision, cuenta_contable, str(numFactura), "", "0", contador,
                             descripcion, "1", base21_str,
@@ -118,7 +147,7 @@ class FacturasLaVozMesActual:
                             "", "", "", "", "", "0", "10"
                         ])
 
-                    # Tramo 4%: base a cuenta estación, IVA a 47200004
+                    # Tramo 4%: SIN CAMBIOS (solo positivos)
                     if (base4 > 0) or (iva4 > 0):
                         listaFicheroExtraIva.append([
                             fecha_emision, cuenta_contable, str(numFactura), "", "0", contador,
@@ -175,22 +204,22 @@ class FacturasLaVozMesActual:
                 iva21  = self._norm_float(linea.get('Iva21', ''))
 
                 # --- Tramo 21% ---
-                if (base21 > 0) or (iva21 > 0):
+                # ✅ entra también si viene en negativo (para que aparezca la línea)
+                if (base21 != 0) or (iva21 != 0):
                     base21_str  = self._norm(base21)
                     iva21_str   = self._norm(iva21)
                     total21_str = self._norm(base21 + iva21)
 
-                    # A..L..M..N..O..P..Q..R..S..T..U..V..W..X..Y  (25 columnas)
                     listaFicheroIva.append([
                         "40000615", proveedor_nombre, proveedor_cif,            # A,B,C
                         str(numFactura), base21_str, "", "", -2,               # D,E,F,G,H
                         "47200021", "S", fecha, "",                            # I,J,K,L
-                        "21", "0",                                             # M,N  👈 M=21, N=0
-                        total21_str, iva21_str, "0", "283",                    # O,P,Q,R  👈 R=283
+                        "21", "0",                                             # M,N
+                        total21_str, iva21_str, "0", "283",                    # O,P,Q,R
                         fecha, "0", "1", "0", "", fecha, "0"                   # S,T,U,V,W,X,Y
                     ])
 
-                # --- Tramo 4% ---
+                # --- Tramo 4% --- (SIN CAMBIOS)
                 if (base4 > 0) or (iva4 > 0):
                     base4_str  = self._norm(base4)
                     iva4_str   = self._norm(iva4)
@@ -200,8 +229,8 @@ class FacturasLaVozMesActual:
                         "40000615", proveedor_nombre, proveedor_cif,            # A,B,C
                         str(numFactura), base4_str, "", "", -2,                # D,E,F,G,H
                         "47200004", "S", fecha, "",                             # I,J,K,L
-                        "4", "0",                                              # M,N  👈 M=4, N=0
-                        total4_str, iva4_str, "0", "204",                      # O,P,Q,R  👈 R=204
+                        "4", "0",                                              # M,N
+                        total4_str, iva4_str, "0", "204",                      # O,P,Q,R
                         fecha, "0", "1", "0", "", fecha, "0"                   # S,T,U,V,W,X,Y
                     ])
 
@@ -232,9 +261,8 @@ class FacturasLaVozMesActual:
 
             diccionario = {}
             for _, fila in df.iterrows():
-                codigo  = self._to_str(fila.get("Codigo", "")).strip()
-                if codigo.endswith(".0"):  # limpiar posibles floats
-                    codigo = codigo[:-2]
+                codigo_raw = fila.get("Codigo", "")
+                codigo = self._norm_codigo(codigo_raw)
                 cuenta  = self._to_str(fila.get("Cuenta", "")).strip()
                 empresa = self._to_str(fila.get("Empresa", "")).strip()
                 if codigo:
