@@ -7,20 +7,25 @@ La Voz de Galicia — Extraer ÚLTIMAS páginas de cada factura desde PDFs compu
 
 Reglas:
 - NO CREA carpetas (ni Log, ni Destino, ni Procesados).
-- Si falta una carpeta requerida, aborta con mensaje claro y lista de directorios existentes.
+- Si falta una carpeta requerida, aborta con mensaje claro.
 - Limpia PDFs previos del destino (si existe).
 - Exporta la ÚLTIMA página de cada factura detectada.
 - Si existe <origen>/Procesados, mueve allí el PDF procesado; si no existe, no mueve y avisa.
+
+Mejoras clave:
+- Segmenta facturas por paginado: inicio cuando detecta "Pág/Página/Hoja 1 de N" y fin cuando detecta "Pág/Página/Hoja N de N".
+  => Las facturas de 1 hoja (1/1) se exportan SIEMPRE.
+- Si falta el ID en texto, crea ID sintético SIN_ID_### (y si hay huecos numéricos, intenta asignarlos por secuencia).
+- Validación: entre el número mínimo y máximo detectado, deben existir TODOS. Si faltan, lanza error y lo reporta.
 """
 
 import os
 import re
-import sys
 import shutil
 import logging
 import traceback
 from datetime import datetime
-from typing import List, Optional  # ✅ compatibilidad Python < 3.9 / < 3.10
+from typing import List, Optional
 
 # --------- Email opcional ---------
 try:
@@ -41,14 +46,14 @@ except Exception:
 
 # ====================== Helpers rutas (incluye long path) ======================
 def _win_long_path(p: str) -> str:
-    """Ruta extendida (\\?\\) para evitar MAX_PATH en Windows."""
+    """Ruta extendida (\\\\?\\) para evitar MAX_PATH en Windows."""
     p = os.path.abspath(p)
     if os.name != "nt":
         return p
     p = p.replace("/", "\\")
     if p.startswith("\\\\?\\"):
         return p
-    if p.startswith("\\\\"):         # UNC
+    if p.startswith("\\\\"):  # UNC
         return "\\\\?\\UNC\\" + p.lstrip("\\")
     return "\\\\?\\" + p
 
@@ -56,31 +61,35 @@ def _normalize_name(s: str) -> str:
     """Normaliza nombres de carpeta: colapsa espacios, strip y casefold."""
     return re.sub(r"\s+", " ", (s or "")).strip().casefold()
 
+def _listdir_safe(dir_path: str) -> List[str]:
+    """os.listdir tolerante a long-path en Windows."""
+    return os.listdir(_win_long_path(dir_path))
+
 def _find_dir_case_insensitive(base: str, names: List[str]) -> Optional[str]:
     """
     Busca en 'base' el primer nombre de 'names' que exista (case-insensitive, ignora espacios múltiples).
-    NO crea nada. Solo primer nivel; si quieres más tolerancia, baja el depth a 1..3.
+    NO crea nada.
+    IMPORTANTE: respeta el ORDEN de 'names' (prioridad).
     """
-    if not os.path.isdir(base):
+    if not os.path.isdir(_win_long_path(base)):
         return None
-    wanted = {_normalize_name(n) for n in names}
-    entries = os.listdir(base)
+
+    entries = _listdir_safe(base)
     norm_map = {_normalize_name(e): e for e in entries}
-    for w in wanted:
-        if w in norm_map:
-            return os.path.join(base, norm_map[w])
+
+    for n in names:  # respeta prioridad
+        key = _normalize_name(n)
+        if key in norm_map:
+            return os.path.join(base, norm_map[key])
     return None
 
 def _find_base(start: str, src_names: List[str], dst_names: List[str]) -> str:
-    """
-    Sube hasta 6 niveles buscando un directorio que contenga alguna de las carpetas de origen o destino.
-    NO crea nada.
-    """
+    """Sube hasta 6 niveles buscando un directorio que contenga alguna carpeta origen o destino."""
     cur = os.path.abspath(start)
     wanted = {_normalize_name(n) for n in (src_names + dst_names)}
     for _ in range(6):
         try:
-            entries = os.listdir(cur)
+            entries = _listdir_safe(cur)
             norm_entries = {_normalize_name(e) for e in entries}
             if norm_entries & wanted:
                 return cur
@@ -94,28 +103,39 @@ def _find_base(start: str, src_names: List[str], dst_names: List[str]) -> str:
 
 
 # ====================== Extracción texto & detección ======================
-RE_DFORM = re.compile(r"\bD\d{2}[\s./-]?\d{5,6}\b", re.IGNORECASE)
-RE_NFACT_HEAD = re.compile(r"(?:N[\.\°º]?\s*o?\.?|Nº|No\.?|N\.)\s*(?:de\s*)?factura\b", re.IGNORECASE)
-RE_PAG_X_DE_Y = re.compile(r"(?:p[aá]gina|hoja|page)\s*(\d{1,3})\s*(?:/|de|of)\s*(\d{1,3})", re.IGNORECASE)
+# ID tipo D26/003153 (tolerante con espacios)
+RE_DFORM = re.compile(r"\bD\s*\d{2}\s*[\s./-]?\s*\d{5,6}\b", re.IGNORECASE)
+
+RE_NFACT_HEAD = re.compile(
+    r"(?:N[\.\°º]?\s*o?\.?|Nº|No\.?|N\.)\s*(?:de\s*)?factura\b",
+    re.IGNORECASE
+)
+
+# Paginado tolerante: "Pág. 1/1", "Página 1 de 3", "Hoja 2/2", "Page 1 of 1"...
+RE_PAG_X_DE_Y = re.compile(
+    r"(?:p[aá]g(?:ina)?\.?|pag(?:ina)?\.?|p[aá]gina|hoja|page)\s*(\d{1,3})\s*(?:/|de|of)\s*(\d{1,3})",
+    re.IGNORECASE
+)
+
 STOPWORDS = {
     "VENCIMIENTOS", "VENCIMIENTO", "FACTURAS", "FACTURA", "TOTAL", "BASE",
     "CLIENTE", "IMPORTE", "IVA", "ALBARAN", "ALBARÁN", "CODIGO", "CÓDIGO",
-    "PAGINA", "HOJA", "PAGE", "DATOS"
+    "PAGINA", "PÁGINA", "HOJA", "PAGE", "DATOS"
 }
 
-def _text(page):
+def _text(page) -> str:
     try:
         return page.extract_text() or ""
     except Exception:
         return ""
 
-def _limpio(token):
+def _limpio(token: str) -> str:
     token = (token or "").strip().strip(" :#.-")
     token = re.sub(r"\s+", "", token)
     return token.upper()
 
 def detectar_id_factura(texto: str) -> Optional[str]:
-    """ID por patrón DISGASA o justo tras 'Nº factura'."""
+    """ID por patrón Dxx/nnnnnn o justo tras 'Nº factura'."""
     t = " ".join((texto or "").split())
 
     m = RE_DFORM.search(t)
@@ -124,26 +144,52 @@ def detectar_id_factura(texto: str) -> Optional[str]:
 
     m = RE_NFACT_HEAD.search(t)
     if m:
-        ventana = t[m.end(): m.end() + 50]
+        ventana = t[m.end(): m.end() + 60]
         m2 = RE_DFORM.search(ventana)
         if m2:
             return _limpio(m2.group(0))
+
         trozos = re.split(r"[\s,:;|]+", ventana.strip())
         if trozos:
             token = _limpio(re.sub(r"[^\w/.\-]", "", trozos[0]))
             if token and any(ch.isdigit() for ch in token) and token not in STOPWORDS:
                 return token
+
     return None
 
-def es_ultima_por_marca(texto: str) -> bool:
+def parse_paginado(texto: str):
+    """Devuelve (x, y) si detecta 'Página/Pág./Hoja/Page x de y'."""
     m = RE_PAG_X_DE_Y.search(texto or "")
     if not m:
-        return False
+        return None
     try:
-        x, y = int(m.group(1)), int(m.group(2))
-        return y > 0 and x == y
+        return int(m.group(1)), int(m.group(2))
     except Exception:
-        return False
+        return None
+
+def id_to_num(fid: str) -> Optional[int]:
+    """Convierte 'D26/003153' -> 3153 (usa el último bloque numérico)."""
+    if not fid:
+        return None
+    nums = re.findall(r"\d+", fid)
+    if not nums:
+        return None
+    try:
+        return int(nums[-1])
+    except Exception:
+        return None
+
+def build_fid_from_num(num: int, template_fid: Optional[str]) -> str:
+    """
+    Construye un ID tipo D26/00NNNNN usando el prefijo de una factura conocida cercana.
+    Si no hay template, usa D00/000000 como base.
+    """
+    prefix = "D00"
+    if template_fid:
+        m = re.search(r"(?i)\bD\s*\d{2}\b", template_fid)
+        if m:
+            prefix = _limpio(m.group(0))
+    return f"{prefix}/{num:06d}"
 
 def nombre_seguro(s: str, maxlen=120) -> str:
     s = re.sub(r"[^A-Za-z0-9\-_\.]+", "_", s).strip("_")
@@ -152,12 +198,20 @@ def nombre_seguro(s: str, maxlen=120) -> str:
 
 # ====================== Lógica por PDF ======================
 def procesar_pdf_compuesto(pdf_path: str, dst_dir: str) -> int:
-    """Exporta la ÚLTIMA página de cada factura detectada. Devuelve cuántas páginas exportó."""
+    """
+    Exporta la ÚLTIMA página de cada factura detectada.
+
+    Segmentación robusta:
+    - Inicio factura: detecta paginado "1 de N"
+    - Fin factura: detecta paginado "N de N"
+    - Si una factura es 1/1 => inicio y fin en la misma página => se exporta siempre.
+    - El ID se intenta leer dentro del bloque. Si no se puede, SIN_ID_###.
+    - Validación de rango: entre min y max numérico detectado, deben estar todas.
+      Si faltan, lanza error con el listado.
+    """
     logging.info("Procesando PDF compuesto: %s", os.path.basename(pdf_path))
 
     pdf_path_long = _win_long_path(pdf_path)
-    dst_dir_long = _win_long_path(dst_dir)
-
     reader = PdfReader(pdf_path_long)
 
     try:
@@ -175,61 +229,125 @@ def procesar_pdf_compuesto(pdf_path: str, dst_dir: str) -> int:
         logging.warning("PDF sin páginas: %s", os.path.basename(pdf_path))
         return 0
 
-    primera_pagina = {}
-    ultima_pagina = {}
-    orden_aparicion = {}
-    secuencia = 0
-    current_id = None
+    # leer textos 1 vez
+    textos = []
+    paginados = []
+    for i in range(n):
+        tx = _text(reader.pages[i])
+        textos.append(tx)
+        paginados.append(parse_paginado(tx))
+
+    # segmentar por paginado
+    facturas = []  # dict(seq, start_idx, last_idx, id, num)
+    current = None
+    seq = 0
 
     for i in range(n):
-        page = reader.pages[i]
-        tx = _text(page)
+        tx = textos[i]
+        pag = paginados[i]
+        fid = detectar_id_factura(tx)
 
-        if current_id and es_ultima_por_marca(tx):
-            ultima_pagina[current_id] = i
+        if current is not None and (not current.get("id")) and fid:
+            current["id"] = fid
+            current["num"] = id_to_num(fid)
 
-        found = detectar_id_factura(tx)
-        if found:
-            if current_id is None:
-                current_id = found
-                secuencia += 1
-                orden_aparicion[current_id] = secuencia
-                primera_pagina[current_id] = i
-            elif found != current_id:
-                prev = current_id
-                if prev not in ultima_pagina:
-                    ultima_pagina[prev] = max(i - 1, primera_pagina.get(prev, i - 1))
-                current_id = found
-                if current_id not in orden_aparicion:
-                    secuencia += 1
-                    orden_aparicion[current_id] = secuencia
-                    primera_pagina[current_id] = i
+        es_inicio = bool(pag and pag[0] == 1 and pag[1] is not None)
+        es_fin = bool(pag and pag[1] and pag[1] > 0 and pag[0] == pag[1])
 
-    if current_id and current_id not in ultima_pagina:
-        ultima_pagina[current_id] = n - 1
+        if es_inicio:
+            # cerrar anterior si quedó abierta
+            if current is not None and current.get("last_idx") is None:
+                current["last_idx"] = i - 1 if i > 0 else 0
+                facturas.append(current)
 
+            seq += 1
+            current = {
+                "seq": seq,
+                "start_idx": i,
+                "last_idx": None,
+                "id": fid,
+                "num": id_to_num(fid) if fid else None,
+            }
+
+        # por si el ID aparece en páginas siguientes del bloque
+        if current is not None and current.get("num") is None and fid:
+            current["id"] = fid
+            current["num"] = id_to_num(fid)
+
+        if current is not None and es_fin:
+            current["last_idx"] = i
+            facturas.append(current)
+            current = None
+
+    # cerrar la última abierta
+    if current is not None:
+        if current.get("last_idx") is None:
+            current["last_idx"] = n - 1
+        facturas.append(current)
+
+    if not facturas:
+        raise ValueError("No se detectaron bloques de facturas por paginado. Revisa el PDF/regex de paginado.")
+
+    # ---------------- Asignación de números faltantes a SIN_ID (si hay huecos) ----------------
+    known_idx = [i for i, it in enumerate(facturas) if it.get("num") is not None]
+    if len(known_idx) >= 2:
+        for a, b in zip(known_idx, known_idx[1:]):
+            na = facturas[a]["num"]
+            nb = facturas[b]["num"]
+            if na is None or nb is None or nb <= na:
+                continue
+
+            between = list(range(a + 1, b))
+            if not between:
+                continue
+
+            missing_nums = list(range(na + 1, nb))
+            unknown_between = [ix for ix in between if facturas[ix].get("num") is None]
+
+            if missing_nums and len(missing_nums) == len(unknown_between):
+                template = facturas[a].get("id") or facturas[b].get("id")
+                for ix, num in zip(unknown_between, missing_nums):
+                    fid_new = build_fid_from_num(num, template)
+                    facturas[ix]["id"] = fid_new
+                    facturas[ix]["num"] = num
+
+    # ---------------- Validación de rango completo ----------------
+    nums_detectados = [it["num"] for it in facturas if it.get("num") is not None]
+    if nums_detectados:
+        first_num = min(nums_detectados)
+        last_num = max(nums_detectados)
+        esperado = set(range(first_num, last_num + 1))
+        presentes = set(nums_detectados)
+        faltan = sorted(esperado - presentes)
+
+        if faltan:
+            msg = f"❌ FALTAN FACTURAS EN EL RANGO {first_num}..{last_num}: {faltan}"
+            logging.error(msg)
+            raise ValueError(msg)
+
+    # ---------------- Exportación ----------------
     base_name = os.path.splitext(os.path.basename(pdf_path))[0]
-    pares = sorted(ultima_pagina.items(), key=lambda kv: orden_aparicion.get(kv[0], 10**9))
-
-    exportadas = 0
     usados = set()
+    exportadas = 0
 
-    for fid, idx_last in pares:
-        writer = PdfWriter()
-        writer.add_page(reader.pages[idx_last])
-
-        orden = orden_aparicion.get(fid, 0)
+    for it in facturas:
+        idx_last = it["last_idx"]
+        fid = it.get("id") or f"SIN_ID_{it['seq']:03d}"
         fid_safe = nombre_seguro(fid)
-        out_name = f"{orden:03d}_{fid_safe}__{base_name}_ULTIMA.pdf"
+
+        out_name = f"{it['seq']:03d}_{fid_safe}__{base_name}_ULTIMA.pdf"
         out_path = os.path.join(dst_dir, out_name)
         out_path_long = _win_long_path(out_path)
 
         k = 1
         while out_path_long.lower() in usados or os.path.exists(out_path_long):
-            out_name = f"{orden:03d}_{fid_safe}__{base_name}_ULTIMA_{k}.pdf"
+            out_name = f"{it['seq']:03d}_{fid_safe}__{base_name}_ULTIMA_{k}.pdf"
             out_path = os.path.join(dst_dir, out_name)
             out_path_long = _win_long_path(out_path)
             k += 1
+
+        writer = PdfWriter()
+        writer.add_page(reader.pages[idx_last])
 
         with open(out_path_long, "wb") as f:
             writer.write(f)
@@ -238,17 +356,18 @@ def procesar_pdf_compuesto(pdf_path: str, dst_dir: str) -> int:
         exportadas += 1
         logging.info("  - Exportada última de %s (pág. %d) -> %s", fid, idx_last + 1, out_name)
 
-    logging.info("Total de últimas páginas exportadas desde %s: %d", os.path.basename(pdf_path), exportadas)
+    logging.info("Total exportadas desde %s: %d", os.path.basename(pdf_path), exportadas)
     return exportadas
 
 
 # ====================== Limpiezas / mover ======================
 def limpiar_destino(dst_dir: str) -> int:
     """Borra PDFs del destino antes de procesar (si existe). NO crea nada."""
-    if not os.path.isdir(dst_dir):
+    if not os.path.isdir(_win_long_path(dst_dir)):
         return 0
+
     borrados = 0
-    for f in os.listdir(dst_dir):
+    for f in _listdir_safe(dst_dir):
         if f.lower().endswith(".pdf"):
             path_long = _win_long_path(os.path.join(dst_dir, f))
             if os.path.isfile(path_long):
@@ -257,6 +376,7 @@ def limpiar_destino(dst_dir: str) -> int:
                     borrados += 1
                 except Exception as e:
                     logging.warning("No se pudo borrar %s: %s", f, e)
+
     if borrados:
         logging.info("🧹 Limpieza destino: %d PDF(s) borrados en '%s'", borrados, dst_dir)
     return borrados
@@ -264,16 +384,18 @@ def limpiar_destino(dst_dir: str) -> int:
 def mover_origen(pdf_path: str, src_dir: str) -> bool:
     """
     Mueve el PDF original a <src_dir>/Procesados SOLO si esa carpeta ya existe.
-    Si no existe, NO crea nada y lo avisa.
+    - Busca 'Procesados' tolerante (mayúsculas/espacios).
+    - Usa long path para evitar problemas en rutas largas/UNC.
     """
     try:
-        proc_dir = os.path.join(src_dir, "Procesados")
-        if not os.path.isdir(proc_dir):
+        proc_dir = _find_dir_case_insensitive(src_dir, ["Procesados"])
+        if not proc_dir or not os.path.isdir(_win_long_path(proc_dir)):
             logging.info("Procesados no existe; no se mueve el origen.")
             return False
 
         base = os.path.basename(pdf_path)
         src_long = _win_long_path(pdf_path)
+
         dest = os.path.join(proc_dir, base)
         dest_long = _win_long_path(dest)
 
@@ -281,7 +403,8 @@ def mover_origen(pdf_path: str, src_dir: str) -> bool:
             name, ext = os.path.splitext(base)
             k = 1
             while True:
-                dest_try_long = _win_long_path(os.path.join(proc_dir, f"{name}_{k}{ext}"))
+                dest_try = os.path.join(proc_dir, f"{name}_{k}{ext}")
+                dest_try_long = _win_long_path(dest_try)
                 if not os.path.exists(dest_try_long):
                     dest_long = dest_try_long
                     break
@@ -290,6 +413,7 @@ def mover_origen(pdf_path: str, src_dir: str) -> bool:
         shutil.move(src_long, dest_long)
         logging.info("📦 Origen movido a Procesados: %s", os.path.basename(dest_long))
         return True
+
     except Exception as e:
         logging.warning("No se pudo mover el origen '%s': %s", pdf_path, e)
         return False
@@ -313,16 +437,15 @@ def configurar_logging(base_dir: str):
     Si existe la carpeta 'Log' dentro de base, escribe fichero allí (no la crea).
     Si no existe, solo consola.
     """
-    # Limpia handlers previos
     for h in logging.root.handlers[:]:
         logging.root.removeHandler(h)
 
     handlers = [logging.StreamHandler()]
     log_dir = _find_dir_case_insensitive(base_dir, ["Log"])
-    if log_dir and os.path.isdir(log_dir):
+    if log_dir and os.path.isdir(_win_long_path(log_dir)):
         log_path = os.path.join(log_dir, "batchLaVozdeGaliciaMesActual.log")
         try:
-            handlers.insert(0, logging.FileHandler(log_path, mode="a", encoding="utf-8"))
+            handlers.insert(0, logging.FileHandler(_win_long_path(log_path), mode="a", encoding="utf-8"))
             logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s",
                                 handlers=handlers)
             logging.info("✅ Logging fichero: %s", log_path)
@@ -337,11 +460,10 @@ def configurar_logging(base_dir: str):
 
 # ====================== MAIN ======================
 def main():
-    # Nombres nuevos (Mes Actual) y antiguos (fallback). NO se crean si faltan.
-    SRC_NAMES = ["Facturas PDF completo La Voz", "Facturas PDF completo La Voz"]
-    DST_NAMES = ["Facturas La Voz de Galicia", "Facturas La Voz de Galicia"]
+    # Mes Actual + fallback (NO se crean si faltan)
+    SRC_NAMES = ["Facturas PDF completo La Voz Mes Actual", "Facturas PDF completo La Voz"]
+    DST_NAMES = ["Facturas La Voz de Galicia Mes Actual", "Facturas La Voz de Galicia"]
 
-    # 1) Base: directorio del script o cwd; luego sube hasta encontrar alguna de las carpetas.
     try:
         probable_base = os.path.dirname(os.path.abspath(__file__))
     except Exception:
@@ -353,24 +475,23 @@ def main():
     logging.info("--------------- INICIO PROCESO LAVOZ ------------------")
     logging.info("Base: %s", base)
     try:
-        logging.info("Contenido base: %s", os.listdir(base))
+        logging.info("Contenido base: %s", _listdir_safe(base))
     except Exception:
         pass
 
-    # 2) Origen / destino (deben EXISTIR)
     src_dir = _find_dir_case_insensitive(base, SRC_NAMES)
     dst_dir = _find_dir_case_insensitive(base, DST_NAMES)
 
     if not src_dir:
-        logging.error("No se encontró carpeta de ORIGEN. Buscadas (insensible a mayúsculas/espacios): %s", SRC_NAMES)
-        print("❌ Falta la carpeta de ORIGEN. Crea una de estas EXACTAMENTE (con o sin mayúsculas):")
+        logging.error("No se encontró carpeta de ORIGEN. Buscadas: %s", SRC_NAMES)
+        print("❌ Falta la carpeta de ORIGEN. Crea una de estas EXACTAMENTE:")
         for n in SRC_NAMES:
             print("   -", n)
         return
 
     if not dst_dir:
-        logging.error("No se encontró carpeta de DESTINO. Buscadas (insensible a mayúsculas/espacios): %s", DST_NAMES)
-        print("❌ Falta la carpeta de DESTINO. Crea una de estas EXACTAMENTE (con o sin mayúsculas):")
+        logging.error("No se encontró carpeta de DESTINO. Buscadas: %s", DST_NAMES)
+        print("❌ Falta la carpeta de DESTINO. Crea una de estas EXACTAMENTE:")
         for n in DST_NAMES:
             print("   -", n)
         return
@@ -378,18 +499,18 @@ def main():
     logging.info("Origen : %s", src_dir)
     logging.info("Destino: %s", dst_dir)
 
-    # 3) Limpiar destino ANTES de procesar
+    # limpiar destino antes
     limpiar_destino(dst_dir)
 
-    # 4) Procesar todos los PDFs del origen
-    pdfs = [f for f in os.listdir(src_dir) if f.lower().endswith(".pdf")]
+    # procesar PDFs del origen
+    pdfs = [f for f in _listdir_safe(src_dir) if f.lower().endswith(".pdf")]
     if not pdfs:
         logging.warning("No hay PDFs en la carpeta de origen.")
         print("⚠️ No hay PDFs en la carpeta de origen.")
         return
 
     total_paginas = 0
-    procesados = 0
+    procesados_ok = 0
     errores = []
 
     for fname in sorted(pdfs):
@@ -397,27 +518,33 @@ def main():
         try:
             n = procesar_pdf_compuesto(path, dst_dir)
             total_paginas += n
-            procesados += 1
+            procesados_ok += 1
             logging.info("✓ %s → últimas páginas exportadas: %d", fname, n)
-            # 5) Mover a Procesados SOLO si ya existe
-            mover_origen(path, src_dir)
+
+            # mover a Procesados SOLO si no hubo error
+            mov = mover_origen(path, src_dir)
+            if not mov:
+                logging.info("No se movió a Procesados (no existe o no accesible).")
+
         except Exception as e:
             err = f"Error procesando {fname}: {e}"
             logging.error(err)
             logging.error(traceback.format_exc())
             errores.append(err)
 
-    logging.info("--------------- FIN PROCESO LAVOZ (total páginas: %d; archivos: %d; errores: %d) ------------------",
-                 total_paginas, procesados, len(errores))
+    logging.info(
+        "--------------- FIN PROCESO LAVOZ (total páginas: %d; OK: %d; errores: %d) ------------------",
+        total_paginas, procesados_ok, len(errores)
+    )
 
     asunto = f"[La Voz] Proceso finalizado — {datetime.now().strftime('%Y-%m-%d %H:%M')}"
     cuerpo = (
-        f"Archivos procesados: {procesados}\n"
+        f"Archivos procesados OK: {procesados_ok}\n"
         f"Últimas páginas exportadas: {total_paginas}\n"
         f"Destino: {dst_dir}\n"
         f"Base: {base}\n"
         f"Errores: {len(errores)}\n"
-        + ("\n".join(errores[:10]) if errores else "Sin errores.")
+        + ("\n".join(errores[:20]) if errores else "Sin errores.")
     )
     enviar_notificacion(["david.casalsuarez@galuresa.com"], asunto, cuerpo)
 
